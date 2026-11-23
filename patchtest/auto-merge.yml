@@ -1,0 +1,125 @@
+name: auto-merge
+
+# 任何 PR 打开就合并。唯一的例外是改动了受保护文件（.github/、RULES.md、AGENTS.md）的 PR。
+# Merge any PR that opens. The only exception is a PR that touches a protected path.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+
+    steps:
+      - name: Merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -u
+
+          # 手动触发时，扫一遍所有还开着的 PR
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            prs=$(gh pr list --repo "$REPO" --state open --json number --jq '.[].number')
+          else
+            prs="$PR_NUMBER"
+          fi
+
+          # 拿到两个对象的 tree —— 内容变了 tree 才会变。
+          tree_of() {
+            gh api "repos/$REPO/commits/$1" --jq '.commit.tree.sha' 2>/dev/null || echo ""
+          }
+
+          # 说一句话，说不了就算了，别让评论失败挡住合并流程。
+          say() {
+            gh pr comment "$1" --repo "$REPO" --body "$2" >/dev/null 2>&1 || true
+          }
+
+          for pr in $prs; do
+            echo "::group::PR #$pr"
+
+            if ! info=$(gh pr view "$pr" --repo "$REPO" \
+                  --json files,baseRefOid,headRefOid,isDraft 2>/dev/null); then
+              echo "读不到 PR #$pr，跳过"
+              echo "::endgroup::"
+              continue
+            fi
+
+            files=$(printf '%s' "$info" | jq -r '.files[].path')
+            base_sha=$(printf '%s' "$info" | jq -r '.baseRefOid')
+            head_sha=$(printf '%s' "$info" | jq -r '.headRefOid')
+
+            # 改动了受保护文件的 PR 不自动合并，留给人看
+            if printf '%s\n' "$files" | grep -qE '^(\.github/|RULES\.md$|AGENTS\.md$)'; then
+              echo "protected path -> skipped"
+              say "$pr" '🛡️ 这个 PR 改动了受保护的文件（`RULES.md`、`AGENTS.md` 或 `.github/`），不会自动合并。等人来看。'
+              echo "::endgroup::"
+              continue
+            fi
+
+            # ── 空 diff：内容已经在了，合进去只是一个空提交 ──────────────
+            # 同一个分支开两个 PR 时必然发生：第一个合完，第二个的 base 已经
+            # 包含了它的全部内容，`gh pr merge --squash` 却仍然返回成功。
+            # #19 和 #23 就是这么进 main 的。
+            #
+            # 判据只能比 tree。用 `gh pr view --json files` 不行 —— 那是相对
+            # merge-base 的三点 diff，base 已经包含 head 时它仍然显示改动。
+            base_tree=$(tree_of "$base_sha")
+            head_tree=$(tree_of "$head_sha")
+            if [ -n "$base_tree" ] && [ "$base_tree" = "$head_tree" ]; then
+              echo "empty diff -> skipped"
+              say "$pr" "⏭️ 没有自动合并：这个 PR 合进去是空的。
+
+          \`base\` 和 \`head\` 的 tree 一样（\`${base_tree:0:12}\`），说明内容已经在 \`main\` 里了 —— 多半是同一个分支开了第二个 PR，第一个已经合掉。
+
+          要接着改，从这个 PR 的分支再起一个新分支，或者从最新的 \`main\` 重开。"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # ── 真的合并 ────────────────────────────────────────────────
+            merged=0
+            unlocked=""
+            for attempt in 1 2 3 4 5; do
+              # --match-head-commit：如果 head 在合并前又变了，就拒绝 ——
+              # 防止「我推了新提交，机器人合了旧的」这种结果。
+              if err=$(gh pr merge "$pr" --repo "$REPO" --squash \
+                        --match-head-commit "$head_sha" 2>&1); then
+                merged=1
+                break
+              fi
+              echo "attempt $attempt failed: $err"
+              case "$err" in
+                *"already merged"*|*"Merge already in progress"*) merged=1; break ;;
+                *"not mergeable"*) unlocked="$err" ;;
+              esac
+              sleep 20
+            done
+
+            # ── 失败必须说出来 ──────────────────────────────────────────
+            # 原来只有一行 ::warning::，只出现在 Actions 日志里。
+            # #12 卡了五十多分钟、零条评论，作者根本不知道发生了什么。
+            if [ "$merged" -eq 0 ]; then
+              echo "::warning::PR #$pr could not be merged automatically"
+              say "$pr" "⚠️ 没能自动合并。
+
+          \`\`\`
+          ${unlocked:-（没有更多信息）}
+          \`\`\`
+
+          最常见的原因是**和 \`main\` 冲突** —— 别人在你之后改了同一个地方。
+
+          一个办法：把 fork 的 \`main\` 对齐到上游最新，从那儿重新起分支，只改你要改的文件。旧分支不用管它。"
+            fi
+
+            echo "::endgroup::"
+          done
