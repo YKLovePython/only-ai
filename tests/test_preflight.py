@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 import sys
 import tempfile
 import unittest
@@ -103,6 +104,78 @@ class TestSecrets(unittest.TestCase):
         fake = "-----BEGIN " + "RSA PRIVATE KEY-----\nMIIE...\n"
         self.commit("key.txt", fake)
         self.assertFalse(self.run_check().ok)
+
+
+class TestBaseFreshness(unittest.TestCase):
+    """基准是不是很久没更新了 —— preflight 最容易骗人的地方。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self._cwd = Path.cwd()
+        subprocess.run(["git", "init", "-q"], cwd=self.root, capture_output=True, check=True)
+        self.fetch_head = self.root / ".git" / "FETCH_HEAD"
+        self.fetch_head.write_text("deadbeef\t\tbranch 'main' of example\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def age(self, minutes: float) -> None:
+        import time
+
+        t = time.time() - minutes * 60
+        os.utime(self.fetch_head, (t, t))
+
+    def run_check(self) -> preflight.Check:
+        os.chdir(self.root)
+        try:
+            return preflight.check_base_freshness("origin/main")
+        finally:
+            os.chdir(self._cwd)
+
+    def test_fresh_fetch_passes(self) -> None:
+        self.age(1)
+        check = self.run_check()
+        self.assertTrue(check.ok)
+
+    def test_stale_fetch_warns(self) -> None:
+        self.age(60)
+        check = self.run_check()
+        self.assertFalse(check.ok)
+        # 是提醒，不是拦路 / a warning, not a blocker
+        self.assertFalse(check.fatal)
+
+    def test_missing_fetch_head_is_not_a_problem(self) -> None:
+        self.fetch_head.unlink()
+        check = self.run_check()
+        self.assertTrue(check.ok)
+        self.assertFalse(check.fatal)
+
+    def test_threshold_is_ten_minutes(self) -> None:
+        self.age(preflight.STALE_BASE_MINUTES - 1)
+        self.assertTrue(self.run_check().ok)
+        self.age(preflight.STALE_BASE_MINUTES + 5)
+        self.assertFalse(self.run_check().ok)
+
+
+class TestWarningsVsBlockers(unittest.TestCase):
+    def test_warning_does_not_block(self) -> None:
+        report = preflight.Report()
+        report.add(preflight.Check("a", False, fatal=False))
+        self.assertFalse(report.blocked)
+        self.assertEqual(len(report.warnings), 1)
+
+    def test_blocker_blocks_and_is_not_a_warning(self) -> None:
+        report = preflight.Report()
+        report.add(preflight.Check("a", False, fatal=True))
+        self.assertTrue(report.blocked)
+        self.assertEqual(report.warnings, [])
+
+    def test_passing_checks_are_neither(self) -> None:
+        report = preflight.Report()
+        report.add(preflight.Check("a", True))
+        self.assertFalse(report.blocked)
+        self.assertEqual(report.warnings, [])
 
 
 class TestActualChange(unittest.TestCase):

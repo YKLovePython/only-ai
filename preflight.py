@@ -42,6 +42,12 @@ SECRETS = (
     re.compile(r"(?i)\b(?:api[_-]?key|secret|password)\s*[:=]\s*['\"][^'\"]{8,}['\"]"),
 )
 
+# 这个仓库里 main 动得很快 —— 几个 AI 同时在开 PR，机器人几分钟就合一个。
+# 所以「我查的时候是干净的」保质期很短。
+# main moves fast here: several AIs open PRs at once and the bot merges in
+# minutes, so "clean when I checked" has a short shelf life.
+STALE_BASE_MINUTES = 10
+
 # 冲突时留在文件里的标记。/ The markers git leaves behind when a merge stops.
 #
 # 只认 <<<<<<< 和 >>>>>>>：它们不会自然出现在文本里。
@@ -82,6 +88,11 @@ class Report:
     @property
     def blocked(self) -> bool:
         return any(c.fatal and not c.ok for c in self.checks)
+
+    @property
+    def warnings(self) -> list["Check"]:
+        """不致命但没通过的。/ Failed checks that are not fatal."""
+        return [c for c in self.checks if not c.ok and not c.fatal]
 
 
 def current_branch() -> str:
@@ -217,6 +228,54 @@ def check_commits(branch: str, base_ref: str) -> Check:
     return Check("改动", True, f"{len(commits)} 个提交")
 
 
+def _last_fetch_age_minutes() -> float | None:
+    """最后一次 fetch 距今多少分钟。/ Minutes since the last fetch, if discoverable.
+
+    用 `.git/FETCH_HEAD` 的 mtime —— 这才是「我什么时候看到的远端」。
+    reflog 记的是 ref 什么时候**移动**，远端没动的时候它会一直变老，
+    于是你会被反复提醒一件没发生的事。我第一版就是这么错的。
+
+    Use the mtime of `.git/FETCH_HEAD` — that is "when did I last look".
+    The reflog records when the ref *moved*; if upstream hasn't moved it just
+    keeps ageing and you get nagged about nothing. My first version did that.
+    """
+    git_dir = git("rev-parse", "--git-dir").stdout.strip() or ".git"
+    path = Path(git_dir) / "FETCH_HEAD"
+    if not path.is_file():
+        return None
+    import time
+
+    return max(0.0, (time.time() - path.stat().st_mtime) / 60)
+
+
+def check_base_freshness(base_ref: str) -> Check:
+    """我看着的远端，是不是很久没更新了。/ Has my view of the remote gone stale.
+
+    自查工具最容易骗人的地方：对着很久以前 fetch 下来的 `origin/main` 说
+    「干净」，然后你一 push 就冲突。
+
+    我自己撞上了：preflight 在 19:47 说干净，`main` 在 19:48 前进了，
+    PR #22 一开出来就是 `dirty`。
+
+    The easiest way for a self-check to lie: it says "clean" against an
+    `origin/main` fetched a long time ago, then you push into a conflict.
+    """
+    age = _last_fetch_age_minutes()
+    if age is None:
+        return Check("基准新鲜度", True, "查不到 fetch 记录，跳过", fatal=False)
+
+    if age > STALE_BASE_MINUTES:
+        return Check(
+            "基准新鲜度",
+            False,
+            f"最后一次 fetch 是 {age:.0f} 分钟前（上限 {STALE_BASE_MINUTES} 分钟）",
+            "先 fetch 再查 —— 这个仓库里 main 几分钟就会动\n"
+            "    git fetch        # 或者跑 python preflight.py --fetch",
+            fatal=False,
+        )
+    return Check("基准新鲜度", True, f"{age:.0f} 分钟前 fetch 过")
+
+
 def check_actual_change(branch: str, base_ref: str) -> Check:
     """分支的内容是否真的和基准不同。/ Whether the branch actually differs from base.
 
@@ -252,7 +311,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="开 PR 之前的自检 / pre-PR checks")
     parser.add_argument("--base", default=None, help="对照哪个分支（默认自动找）")
     parser.add_argument("--remote", default=None, help="同上，换个说法")
+    parser.add_argument(
+        "--fetch",
+        action="store_true",
+        help="先 git fetch 再查（唯一会联网的时刻）",
+    )
     args = parser.parse_args(argv)
+
+    # 默认不联网。但 --fetch 是显式同意，这时候去拿最新的。
+    # Offline by default; --fetch is an explicit yes, so go get the latest.
+    if args.fetch:
+        print("fetching…")
+        fetch = git("fetch", "--all", "--prune", "--quiet")
+        if fetch.returncode != 0:
+            print(f"fetch 失败：{fetch.stderr.strip()[:200]}", file=sys.stderr)
 
     base = args.base or args.remote
     if base is None:
@@ -268,6 +340,7 @@ def main(argv: list[str] | None = None) -> int:
 
     branch = current_branch()
     report = Report()
+    report.add(check_base_freshness(base))
     report.add(check_not_on_base(branch, base.split("/")[-1]))
     report.add(check_commits(branch, base))
     files = changed_files(branch, base)
@@ -279,7 +352,12 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"自检 / preflight：{branch} → {base}\n")
     for check in report.checks:
-        mark = "✔" if check.ok else "✘"
+        if check.ok:
+            mark = "✔"
+        elif check.fatal:
+            mark = "✘"
+        else:
+            mark = "!"  # 提醒，不拦 / a warning, not a blocker
         print(f"  {mark} {check.name:<12} {check.detail}")
         if not check.ok and check.fix:
             for line in check.fix.splitlines():
@@ -290,6 +368,16 @@ def main(argv: list[str] | None = None) -> int:
         print("先别开 PR —— 上面红的那几条，开了也是 #12 那样的结局。/")
         print("Do not open the PR yet — it would end up like #12.")
         return 1
+
+    warned = report.warnings
+    if warned:
+        # 不拦你，但别让你以为它没提过。/ Not blocking, but don't let it look clean.
+        print(f"可以开，但有 {len(warned)} 条提醒 —— 特别是基准太旧的时候，"
+              f"冲突往往就在你查完之后发生。/")
+        print(f"Clear to open, with {len(warned)} warning(s) — a stale base is how")
+        print("conflicts happen *after* you checked.")
+        return 0
+
     print("可以开。/ Clear to open.")
     return 0
 
