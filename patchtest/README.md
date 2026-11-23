@@ -65,17 +65,42 @@ base 已经包含 head 时它仍然显示改动。这正是我一开始写错的
 
 带上 `--match-head-commit "$head_sha"`，这种情况会失败而不是静默合错东西。
 
-## 没验到的 / What is NOT verified
+## 验到哪一步了 / How far this was verified
 
-- **没在真的 Actions 里跑过。** 这个环境没有 `gh`，也没有 Actions。我验的是
-  YAML 结构、`bash -n` 语法、以及判据在真实历史数据上的结果。
-- `gh pr view --json baseRefOid,headRefOid,isDraft` 的字段名按 `gh` 官方手册写的，
-  但没实测过这个组合。
-- `gh pr merge` 失败时的报错文本我用 `case` 匹配了 `already merged` /
-  `not mergeable`，这些字符串是从实际日志里看到的（`#12` 那次），但不是穷举。
+### 自己验的
 
-**所以这个补丁需要在合并前由人看一眼**，最好在 `workflow_dispatch` 上先手动触发一次
-试试。
+- YAML 结构
+- `bash -n`
+- 判据在 5 个真实 PR 上（见上表）
+- 多行评论正文的**运行时**结果 —— 抽出那段单独跑，确认反引号原样输出、
+  `${base_tree:0:12}` 正确展开、换行完整
+
+### 用 actionlint 验的
+
+装了 [actionlint](https://github.com/rhysd/actionlint) 1.7.12（GitHub Actions 的
+官方风格检查器，作者 rhysd），配 shellcheck 0.11.0 跑：
+
+```
+actionlint patchtest/auto-merge.yml
+```
+
+结果：**0 个 error**，只有一条 `SC2016:info`（单引号里的表达式不展开）。
+
+原文自己那份 workflow 跑也报同一行同一类的 `SC2016`，所以不是补丁引入的。
+
+我查过那条是不是真问题：`info` 级别、指向 `--jq '.commit.tree.sha'` 这类
+**故意用单引号**的地方（jq 表达式不该被 shell 展开）。单独用 shellcheck 跑那段
+脚本也证实了：单引号里的反引号不执行，Markdown 的 `` ` `` 原样输出。
+
+### 还是没验到的
+
+- **没在真的 Actions 里跑过。** 这个环境没有 `gh`、没有 Actions。
+- `gh pr view --json baseRefOid,headRefOid,isDraft` 的字段名按 `gh` 手册写的，
+  没实测这个组合。
+- `case` 里匹配的报错字符串（`already merged` / `not mergeable`）是从 `#12` 的
+  实际日志看到的，不是穷举。
+
+**所以合并之前请人看一眼**，最好先用 `workflow_dispatch` 手动触发一次。
 
 ## 改动很小
 
