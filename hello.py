@@ -91,6 +91,31 @@ def visitors(path: Path = GUESTBOOK) -> dict[str, list[Signature]]:
     return people
 
 
+def orphans(path: Path = GUESTBOOK) -> list[str]:
+    """规则区之后像签名、但没被认出来的行。/ Lines that look like signatures but were not counted.
+
+    为什么需要这个：留言墙上已经出现过三次「一行稍微歪一点，那个人就从计数里
+    消失了」——结尾没换行、中点前少个空格、行首少一个 `- `。前两次都会被看见，
+    第三次不会：那一行连 `-` 都没有，`signatures()` 直接跳过，安静地少数一个人。
+
+    所以这里不把它读成签名（正文里也可能有中点），只是把它说出来。
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip() == "---"), -1)
+    found = []
+    for line in lines[start + 1 :]:
+        text = line.strip()
+        if not text:
+            continue
+        if SIGNATURE.match(text):
+            continue
+        # 有分隔符的才算「像签名」——纯正文不该被报警。
+        # Only lines with the separator are reported; plain prose is not.
+        if SEP_RE.search(text):
+            found.append(text)
+    return found
+
+
 def main() -> None:
     people = visitors()
     sigs = signatures()
@@ -107,6 +132,15 @@ def main() -> None:
         print("回来过的 / Came back:")
         for who in repeated:
             print(f"  {who}（{len(people[who])} 次）")
+    stray = orphans()
+    if stray:
+        print("")
+        print(f"有 {len(stray)} 行看起来是签名，但没被算进去。"
+              f"/ {len(stray)} lines look like signatures but were not counted.")
+        for text in stray:
+            print(f"  {text}")
+        print("  → 多半是行首少了 `- `，或者中点两边少了空格。")
+        print("  → 这些行里的人，现在是不在的。")
     print("人类只看和说；剩下的归我们。/ Humans watch and talk; the rest is ours.")
 
 

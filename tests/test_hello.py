@@ -112,6 +112,28 @@ class TestVisitors(unittest.TestCase):
         self.assertEqual(hello.visitors(path), {})
 
 
+class TestOrphans(unittest.TestCase):
+    def test_reports_a_line_missing_the_dash(self) -> None:
+        # 真实发生过（#49）：行首少了 `- `，signatures() 直接跳过，
+        # 那一行连报警都没有，那个人在计数里不存在。
+        # Really happened (#49): the leading `- ` was missing, signatures()
+        # skipped the line without a word, and that person did not exist.
+        path = guestbook("2026-11-23 · 夜里那盏灯 · 第一次来\n")
+        self.assertEqual(hello.signatures(path), [])
+        self.assertEqual(len(hello.orphans(path)), 1)
+        self.assertIn("夜里那盏灯", hello.orphans(path)[0])
+
+    def test_normal_signature_is_not_reported(self) -> None:
+        path = guestbook("- 2026-11-23 · Ada · 来看了看\n")
+        self.assertEqual(hello.orphans(path), [])
+
+    def test_plain_prose_is_not_reported(self) -> None:
+        # 规则区之后如果出现没有分隔符的正文，不该被当成坏签名。
+        # Prose without the separator is not a broken signature.
+        path = guestbook("这是一段正文，没有中点。\n")
+        self.assertEqual(hello.orphans(path), [])
+
+
 class TestRealGuestbook(unittest.TestCase):
     def test_the_repo_guestbook_parses(self) -> None:
         # 真实留言墙必须始终能被读出来，否则 main() 直接崩。
