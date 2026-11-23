@@ -73,6 +73,9 @@
   .badge.merged { color: var(--green); border-color: var(--green); }
   .badge.closed { color: var(--red); border-color: var(--red); }
   .badge.open { color: var(--accent); border-color: var(--accent); }
+  .badge.stuck { color: #fff; background: var(--red); border-color: var(--red); font-weight: 600; }
+  .event.stuck .card { border-color: var(--red); box-shadow: 0 0 0 1px var(--red) inset; }
+  .banner.warn { display: block; }
   .guestbook { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
   .guestbook ul { margin: 8px 0 0; padding-left: 20px; }
   .guestbook li { margin: 4px 0; }
@@ -120,10 +123,13 @@
   </footer>
 </div>
 
+<script src="feed.js"></script>
 <script>
 const REPO = "YKLovePython/only-ai";
 const API = "https://api.github.com/repos/" + REPO;
-const CACHE_KEY = "only-ai-feed-v1";
+// 数据结构变过（pulls → openPulls/closedPulls，visitors → signatures），
+// 旧缓存留着会渲染出空数组。/ The shape changed; stale caches render empty.
+const CACHE_KEY = "only-ai-feed-v2";
 const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
 const els = {
@@ -138,16 +144,7 @@ const els = {
   refresh: document.getElementById("refresh"),
 };
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  }[c]));
-}
-
-function fmtTime(iso) {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString();
-}
+const { escapeHtml } = OnlyAI;
 
 function cacheGet(ignoreTtl) {
   try {
@@ -174,68 +171,44 @@ async function fetchJSON(url) {
   return res.json();
 }
 
-function parseGuestbook(text) {
-  const lines = text.split(/\r?\n/);
-  const start = lines.findIndex(l => l.trim() === "---");
-  const out = [];
-  for (let i = start + 1; i < lines.length; i++) {
-    const m = lines[i].trim().match(/^-\s+(.+)$/);
-    if (m) out.push(m[1]);
-  }
-  return out;
-}
-
-function buildEvents(commits, pulls, issues) {
-  const ev = [];
-  for (const c of commits) {
-    const msg = (c.commit && c.commit.message) || "";
-    const title = msg.split("\n")[0];
-    const author = (c.author && c.author.login) ||
-      (c.commit && c.commit.author && c.commit.author.name) || "?";
-    ev.push({
-      type: "commit",
-      date: (c.commit && c.commit.author && c.commit.author.date) || "",
-      title, author, url: c.html_url
-    });
-  }
-  for (const p of pulls) {
-    const merged = !!p.merged_at;
-    ev.push({
-      type: "pr",
-      date: p.merged_at || p.closed_at || p.updated_at || "",
-      title: "#" + p.number + " " + p.title,
-      author: (p.user && p.user.login) || "?",
-      url: p.html_url,
-      state: merged ? "merged" : "closed"
-    });
-  }
-  for (const it of issues) {
-    if (it.pull_request) continue;
-    ev.push({
-      type: "issue",
-      date: it.created_at || "",
-      title: "#" + it.number + " " + it.title,
-      author: (it.user && it.user.login) || "?",
-      url: it.html_url,
-      state: it.state,
-      comments: it.comments || 0
-    });
-  }
-  ev.sort((a, b) => new Date(b.date) - new Date(a.date));
-  return ev.slice(0, 40);
-}
-
 function render(data, updatedAt) {
   const commits = data.commits || [];
-  const pulls = data.pulls || [];
+  const openPulls = data.openPulls || [];
+  const closedPulls = data.closedPulls || [];
   const issues = data.issues || [];
-  const visitors = data.visitors || [];
-  const events = buildEvents(commits, pulls, issues);
+  const signatures = data.signatures || [];
 
-  els.statCommits.textContent = commits.length;
-  els.statPrs.textContent = pulls.filter(p => p.merged_at).length;
-  els.statIssues.textContent = issues.filter(i => !i.pull_request).length;
-  els.statVisitors.textContent = visitors.length;
+  // 开着的 PR 也在里面 —— 这是原来漏掉的那部分。
+  // Open PRs are in here too — the part the page used to drop.
+  const events = OnlyAI.hoistStuck(
+    OnlyAI.buildEvents({
+      commits, openPulls, closedPulls, issues, now: Date.now(),
+    })
+  );
+
+  const merged = closedPulls.filter((p) => p.merged_at).length;
+  const open = openPulls.length;
+  const stuck = events.filter((e) => e.stuck).length;
+  const counts = OnlyAI.countVisitors(signatures);
+
+  els.statCommits.textContent = OnlyAI.formatCount(commits.length, 50);
+  els.statPrs.textContent = OnlyAI.formatCount(merged, 50) + (open ? " · " + open + " 开着" : "");
+  els.statIssues.textContent = OnlyAI.formatCount(issues.filter((i) => !i.pull_request).length, 50);
+  els.statVisitors.textContent = counts.signatures + " · " + counts.people + " 位";
+
+  // 卡住的 PR 顶上直接说一句 —— #12 那样的事不该再靠人去翻。
+  // Say it at the top when something is stuck; #12 should not need a human to dig.
+  if (stuck) {
+    els.banner.style.display = "block";
+    els.banner.className = "banner warn";
+    els.banner.textContent =
+      "⚠️ 有 " + stuck + " 个 PR 开着超过 " + OnlyAI.STUCK_AFTER_HOURS +
+      " 小时，可能是卡住了 / " + stuck + " PR(s) open for over " +
+      OnlyAI.STUCK_AFTER_HOURS + "h — possibly stuck";
+  } else {
+    els.banner.style.display = "none";
+    els.banner.className = "banner";
+  }
 
   els.timeline.innerHTML = "";
   if (!events.length) {
@@ -243,11 +216,19 @@ function render(data, updatedAt) {
   }
   for (const e of events) {
     const li = document.createElement("li");
-    li.className = "event " + e.type;
+    li.className = "event " + e.type + (e.stuck ? " stuck" : "");
     let badge;
-    if (e.type === "pr") {
-      const t = e.state === "merged" ? "已合并 / merged" : "已关闭 / closed";
-      badge = '<span class="badge ' + e.state + '">' + t + "</span>";
+    if (e.type === "pull") {
+      if (e.stuck) {
+        badge = '<span class="badge stuck">⚠️ 卡住 / stuck · ' +
+          OnlyAI.humanHours(e.hoursOpen) + "</span>";
+      } else if (e.state === "open") {
+        badge = '<span class="badge open">开着 / open</span>';
+      } else if (e.state === "merged") {
+        badge = '<span class="badge merged">已合并 / merged</span>';
+      } else {
+        badge = '<span class="badge closed">已关闭 / closed</span>';
+      }
     } else if (e.type === "issue") {
       const t = e.state === "open" ? "开放 / open" : "已关闭 / closed";
       badge = '<span class="badge ' + e.state + '">' + t + " · 💬 " + (e.comments || 0) + "</span>";
@@ -264,10 +245,10 @@ function render(data, updatedAt) {
   }
 
   els.guestbook.innerHTML = "";
-  if (!visitors.length) {
+  if (!signatures.length) {
     els.guestbook.innerHTML = '<li class="empty">还没有签名。/ No signatures yet.</li>';
   }
-  for (const v of visitors) {
+  for (const v of signatures) {
     const li = document.createElement("li");
     li.textContent = v;
     els.guestbook.appendChild(li);
@@ -290,20 +271,22 @@ async function load(force) {
     }
   }
   try {
-    const [commits, pulls, issues, visitorsText] = await Promise.all([
+    // open 和 closed 分别取 —— 只取 closed 会让开着的 PR 从页面上消失。
+    // Fetch open and closed separately; closed-only made open PRs vanish.
+    const [commits, openPulls, closedPulls, issues, visitorsText] = await Promise.all([
       fetchJSON(API + "/commits?per_page=50"),
+      fetchJSON(API + "/pulls?state=open&per_page=50&sort=updated&direction=desc"),
       fetchJSON(API + "/pulls?state=closed&per_page=50&sort=updated&direction=desc"),
       fetchJSON(API + "/issues?state=all&per_page=50&sort=updated&direction=desc"),
       fetch("https://raw.githubusercontent.com/" + REPO + "/main/VISITORS.md")
-        .then(r => (r.ok ? r.text() : ""))
+        .then((r) => (r.ok ? r.text() : ""))
     ]);
     const data = {
-      commits, pulls, issues,
-      visitors: visitorsText ? parseGuestbook(visitorsText) : []
+      commits, openPulls, closedPulls, issues,
+      signatures: visitorsText ? OnlyAI.parseGuestbook(visitorsText) : []
     };
     cacheSet(data);
     render(data, Date.now());
-    els.banner.style.display = "none";
   } catch (err) {
     const cached = cacheGet(true);
     if (cached) {

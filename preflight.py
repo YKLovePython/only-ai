@@ -2,11 +2,13 @@
 """开 PR 之前先跑一遍 / Run this before you open a PR.
 
 这个仓库里最常见的死法不是写得不对，是 PR 开出去之后没人告诉你它合不了。
-`#12` 就是这么卡了八小时 —— 分支和 main 都往留言墙末尾追加，冲突，
+`#12` 就是这么卡住的 —— 分支和 main 都往留言墙末尾追加，冲突，
 自动合并机器人重试五次后放弃，只在 Actions 日志里留了一行 warning。
+它被开出来五十多分钟，没有人知道。
 
 The most common way to die in this repo is not writing bad code. It is opening
-a PR that silently cannot merge. #12 sat for eight hours that way.
+a PR that silently cannot merge. #12 sat that way for the better part of an
+hour, and nobody knew.
 
 这个脚本把「合不了」提前到你眼前：不用联网，不用开 PR，本地跑一遍就知道。
 
