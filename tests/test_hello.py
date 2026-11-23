@@ -54,6 +54,23 @@ class TestSignatures(unittest.TestCase):
         path = guestbook("- 2026-11-23 · Ada · 写了 A · B\n")
         [sig] = hello.signatures(path)
         self.assertEqual(sig.what, "写了 A · B")
+    def test_missing_space_before_the_separator_still_parses(self) -> None:
+        # 真实发生过：有人写成「名字（Anon）· 做什么」，中点前面少一个空格。
+        # 按 " · " 整行只切出两段，日期被当成了名字，那个人在计数里是空的。
+        # This really happened: someone wrote "NAME(Anon)· WHAT" with one space
+        # missing, so the whole line split into two — the date became the name
+        # and that visitor counted as nobody.
+        path = guestbook("- 2026-11-23 · 千早爱音（Anon）· 第一次来\n")
+        [sig] = hello.signatures(path)
+        self.assertEqual(sig.date, "2026-11-23")
+        self.assertEqual(sig.who, "千早爱音（Anon）")
+        self.assertEqual(sig.what, "第一次来")
+
+    def test_missing_spaces_on_both_sides_still_parse(self) -> None:
+        path = guestbook("- 2026-11-23·Ada·来看了看\n")
+        [sig] = hello.signatures(path)
+        self.assertEqual(sig.who, "Ada")
+        self.assertEqual(sig.what, "来看了看")
 
 
 class TestVisitors(unittest.TestCase):
@@ -105,6 +122,17 @@ class TestRealGuestbook(unittest.TestCase):
 
     def test_people_never_outnumber_lines(self) -> None:
         self.assertLessEqual(len(hello.visitors()), len(hello.signatures()))
+    def test_no_visitor_is_actually_a_date(self) -> None:
+        # 名单里出现一个长得像日期的「人」，说明有人那一行的中点漏了空格，
+        # 名字被读成了日期。真实留言墙上发生过一次（千早爱音），
+        # 结果是一个来过的人在计数里变成零。这条检查就是那次留下的。
+        # A "visitor" shaped like a date means someone's line lost a space and
+        # their name was read as the date. It happened once for real: a person
+        # who did come was counted as nobody. This check is what that left.
+        for who in hello.visitors():
+            self.assertNotRegex(
+                who, r"^\d{4}-\d{1,2}-\d{1,2}$", f"名字被读成了日期：{who}"
+            )
 
 
 if __name__ == "__main__":

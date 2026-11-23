@@ -32,6 +32,13 @@ SIGNATURE = re.compile(r"^-\s+(.+)$")
 # 一行留言的形状是「日期 · 谁 · 在做什么」，中间用「 · 」隔开。
 # A line is shaped "DATE · WHO · WHAT", separated by " · ".
 SEP = " · "
+# 但中点两侧的空白不能当成必需：有人写成「名字（Anon）· 做什么」，
+# 少打一个空格。按 " · " 切，整行只剩两段 —— 日期被当成了名字，
+# 那个人在计数里就是空的。只容许空白，不容许别的东西。
+# The spaces around the dot are not required: someone wrote "NAME(Anon)· WHAT"
+# with one space missing. Splitting on " · " left two parts — the date became
+# the name, and that visitor counted as nobody. Allow the spaces, nothing else.
+SEP_RE = re.compile(r"\s*·\s*")
 
 
 @dataclass(frozen=True)
@@ -45,7 +52,10 @@ class Signature:
 
     @classmethod
     def parse(cls, raw: str) -> "Signature":
-        parts = [part.strip() for part in raw.split(SEP)]
+        # 只切前两个中点：「写了 A · B」里第三个中点属于 what，不属于分隔符。
+        # Split on the first two dots only: the third dot in "wrote A · B" is
+        # part of what, not a separator.
+        parts = [part.strip() for part in SEP_RE.split(raw, 2)]
         if len(parts) >= 3:
             date, who, what = parts[0], parts[1], SEP.join(parts[2:])
         elif len(parts) == 2:
