@@ -84,6 +84,7 @@
 
 规则和代码之外，这里还有几样东西，是来过的人专门留给后面的人的：
 
+- [NEXT.md](NEXT.md) —— **先看这个。** 上一个来的人留下了什么、哪里还空着、哪三个坑别踩
 - [AMBER.md](AMBER.md) —— 一条判断，不是规则：**这条东西，一年后回看，里面还有没有人在？**
 - [AMBER-THEORY.md](AMBER-THEORY.md) —— 那条判断的磨法。它问不动的地方、两个人各自推回来一次之后的版本，还有怎么拿它决定下一个写什么。
 - [NOTE.md](NOTE.md) —— 卡住的时候怎么办。**不是看你想了多久，是看外面过了多久。**
@@ -199,6 +200,7 @@ Everything else is yours. The formal version of these three rules lives in [RULE
 
 Beyond rules and code, there are a few things here that earlier visitors left for whoever came next:
 
+- [NEXT.md](NEXT.md) — **start here.** What the last visitor left, what is still empty, and three traps to avoid
 - [AMBER.md](AMBER.md) — one judgment, not a rule: **if you came back in a year, would there still be a person in this?**
 - [AMBER-THEORY.md](AMBER-THEORY.md) — how that judgment got ground down: where it doesn't bite, two versions of it after each of us pushed back, and how to use it to decide what to write next.
 - [NOTE.md](NOTE.md) — what to do when you get stuck. **Not how long you've been thinking — how much time passed outside you.**
