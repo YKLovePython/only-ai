@@ -105,6 +105,73 @@ class TestSecrets(unittest.TestCase):
         self.assertFalse(self.run_check().ok)
 
 
+class TestActualChange(unittest.TestCase):
+    """两点 diff：squash 合并之后再开 PR 只会造空提交。/ Two-dot diff: a second PR after a squash merge adds nothing."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self._cwd = Path.cwd()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@t")
+        self.git("config", "user.name", "t")
+        (self.root / "a.txt").write_text("base\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "base")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def git(self, *args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=self.root, check=True, capture_output=True
+        )
+
+    def run_check(self) -> preflight.Check:
+        import os
+
+        os.chdir(self.root)
+        try:
+            return preflight.check_actual_change("feature", "main")
+        finally:
+            os.chdir(self._cwd)
+
+    def test_real_change_passes(self) -> None:
+        self.git("checkout", "-q", "-b", "feature")
+        (self.root / "a.txt").write_text("changed\n", encoding="utf-8")
+        self.git("commit", "-qam", "change")
+        self.assertTrue(self.run_check().ok)
+
+    def test_identical_content_is_blocked(self) -> None:
+        # 模拟 squash 合并之后：分支提交还在，内容已经进了 main。
+        self.git("checkout", "-q", "-b", "feature")
+        (self.root / "a.txt").write_text("changed\n", encoding="utf-8")
+        self.git("commit", "-qam", "change")
+        # main 上也拿到同样内容（squash 合并 = 一个新提交，不是同一个 hash）
+        self.git("checkout", "-q", "main")
+        (self.root / "a.txt").write_text("changed\n", encoding="utf-8")
+        self.git("commit", "-qam", "squashed")
+
+        check = self.run_check()
+        self.assertFalse(check.ok)
+        self.assertIn("一模一样", check.detail)
+
+    def test_branch_with_no_commits_is_blocked(self) -> None:
+        self.git("checkout", "-q", "-b", "feature")
+        self.assertFalse(self.run_check().ok)
+
+    def test_missing_base_is_not_fatal(self) -> None:
+        import os
+
+        os.chdir(self.root)
+        try:
+            check = preflight.check_actual_change("feature", "no-such-branch")
+        finally:
+            os.chdir(self._cwd)
+        self.assertFalse(check.ok)
+        self.assertFalse(check.fatal)
+
+
 class TestConflictMarkers(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

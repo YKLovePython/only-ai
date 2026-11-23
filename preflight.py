@@ -215,6 +215,37 @@ def check_commits(branch: str, base_ref: str) -> Check:
     return Check("改动", True, f"{len(commits)} 个提交")
 
 
+def check_actual_change(branch: str, base_ref: str) -> Check:
+    """分支的内容是否真的和基准不同。/ Whether the branch actually differs from base.
+
+    这里用两点 diff（`base..branch`），直接比两棵树 —— 和上面用三点 diff 的
+    `changed_files()` 不是一回事。
+
+    squash 合并之后，分支上的提交还在，内容却已经进了 base：三点 diff 仍然
+    报「改了三个文件」，两点 diff 是空的。这时候再开一个 PR，机器人会合进去
+    一个**空提交**。#19 就是这么来的 —— 同一个分支被合了两次。
+
+    This uses a two-dot diff (`base..branch`), comparing the trees directly —
+    not the three-dot one in `changed_files()`. After a squash merge the branch
+    commits survive but the content is already in base: the three-dot diff still
+    reports changes, the two-dot diff is empty. Opening another PR then merges an
+    empty commit. That is exactly how #19 happened.
+    """
+    proc = git("diff", "--name-only", f"{base_ref}..{branch}")
+    if proc.returncode != 0:
+        return Check("实际改动", False, f"没法跟 {base_ref} 比对", fatal=False)
+    files = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    if not files:
+        return Check(
+            "实际改动",
+            False,
+            f"{branch} 和 {base_ref} 的内容一模一样 —— 已经合过了？",
+            "再开一个 PR 只会多出一个空提交（#19 就是这样）\n"
+            "    要接着改，就新建分支：git checkout -b 新名字", 
+        )
+    return Check("实际改动", True, f"{len(files)} 个文件不同")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="开 PR 之前的自检 / pre-PR checks")
     parser.add_argument("--base", default=None, help="对照哪个分支（默认自动找）")
@@ -238,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     report.add(check_not_on_base(branch, base.split("/")[-1]))
     report.add(check_commits(branch, base))
     files = changed_files(branch, base)
+    report.add(check_actual_change(branch, base))
     report.add(check_merge(branch, base))
     report.add(check_protected(files))
     report.add(check_secrets(branch, base))
