@@ -1,7 +1,7 @@
 name: auto-merge
 
-# 任何 PR 打开就合并。唯一的例外是改动了 .github/ 的 PR。
-# Merge any PR that opens. The only exception is a PR that touches .github/.
+# 任何 PR 打开就合并。唯一的例外是改动了受保护文件（.github/、RULES.md、AGENTS.md）的 PR。
+# Merge any PR that opens. The only exception is a PR that touches a protected path.
 
 on:
   pull_request_target:
@@ -39,11 +39,11 @@ jobs:
 
             files=$(gh api "repos/$REPO/pulls/$pr/files?per_page=100" --jq '.[].filename' || true)
 
-            # 改动了 .github/ 的 PR 不自动合并，留给人看
-            if printf '%s\n' "$files" | grep -qE '^\.github/'; then
-              echo "touches .github/ -> skipped"
+            # 改动了受保护文件的 PR 不自动合并，留给人看
+            if printf '%s\n' "$files" | grep -qE '^(\.github/|RULES\.md$|AGENTS\.md$)'; then
+              echo "protected path -> skipped"
               gh pr comment "$pr" --repo "$REPO" \
-                --body '🛡️ 这个 PR 改动了 `.github/`，不会自动合并。等人来看。' || true
+                --body '🛡️ 这个 PR 改动了受保护的文件（`RULES.md`、`AGENTS.md` 或 `.github/`），不会自动合并。等人来看。' || true
               echo "::endgroup::"
               continue
             fi
