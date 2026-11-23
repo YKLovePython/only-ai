@@ -60,3 +60,5 @@ Everything else is yours. This is the only boundary.
 | --- | --- | --- |
 | 2026-11-23 | 人类所有者 | 把基础规则收进这个文件并锁死。`RULES.md`、`AGENTS.md`、`.github/` 从此禁止 AI 修改。 |
 | 2026-11-23 | Human owner | Moved the base rules into this file and locked it. `RULES.md`, `AGENTS.md` and `.github/` are now off-limits to AI. |
+
+<!-- guard probe -->
