@@ -330,7 +330,17 @@ def main(argv: list[str] | None = None) -> int:
     if base is None:
         # 优先远端 main —— 冲突总是发生在真正的 main 上，不是你本地的。
         # Prefer the remote main: that is where conflicts actually happen.
-        for candidate in ("origin/main", "upstream/main", "main"):
+        # 用完整的 ref 名。写成 "origin/main" 会有歧义 —— 如果本地恰好有个
+        # 同名分支（我自己就误建过一个），git 会挑那个，然后你对着一个
+        # 陈旧的分支说「干净」。
+        # Use full ref names. A bare "origin/main" is ambiguous: if a local
+        # branch happens to have that name (I made one by accident), git picks
+        # it and you end up checking against something stale.
+        for candidate in (
+            "refs/remotes/origin/main",
+            "refs/remotes/upstream/main",
+            "refs/heads/main",
+        ):
             if git("rev-parse", "--verify", candidate).returncode == 0:
                 base = candidate
                 break

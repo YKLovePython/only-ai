@@ -247,8 +247,9 @@ def check_behind(compare: dict) -> Check:
             "基准",
             False,
             f"main 比这个分支多 {behind} 个提交",
-            "开 PR 之前先把分支对齐到最新 main\n"
-            "    （HTTP 的做法见 README_http.md，或者直接重起一个分支）",
+            "main 已经往前走了，你这个分支看不到那些改动。\n"
+            "    HTTP 的做法：把 fork 的 main 对齐到上游最新，从那儿重新起分支，\n"
+            "    再把你改的那几个文件重新 PUT 一遍（#12 就是这么救回来的）",
             fatal=False,
         )
     return Check("基准", True, "分支在 main 之上")
