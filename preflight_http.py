@@ -41,6 +41,22 @@ nothing to them, so this does the same checks through the compare API.
 这很重要。#12 的结局是机器人重试五次、放弃、在 Actions 日志里留一行
 warning，然后没有人知道。你要在那之前看到 `dirty`。
 
+网络
+====
+
+GitHub 的 HTTP/2 在某些网络下会握手到一半被断，报的是
+`unexpected eof while reading` 或者证书主机名不匹配。看起来像证书作废，
+其实只是连接没了。
+
+所以这里：
+
+- 每次请求带 `Connection: close`，不复用连接
+- 5xx 和网络错误重试三次，退避 2 / 4 秒
+- **连不上和检查没过分开报**，退出码 3 和 1 不同
+
+网络问题扮成「你的分支没推上去」，会让人去查一个不存在的问题。
+我第一版就是这样，被我自己的网络坑了一次。
+
 用法
 ====
 
@@ -117,34 +133,76 @@ class Report:
 # --------------------------------------------------------------------------
 
 
+class NetworkError(Exception):
+    """连不上，或者连上了但话没说完。/ Could not connect, or the connection died mid-sentence."""
+
+
 class GitHub:
-    def __init__(self, token: str):
+    def __init__(self, token: str, retries: int = 3):
         self.token = token
+        self.retries = retries
 
     def get(self, path: str) -> dict | list | None:
+        """拿 JSON。404 / 403 返回 None；网络问题抛 NetworkError。
+
+        / Fetch JSON. A 404 or 403 returns None; a network problem raises.
+
+        分清楚这两件事很重要。原来所有失败都返回 None，于是一次握手失败会被
+        报成「分支没推上去吗？」—— 假的诊断比没有诊断更坏。
+
+        Keeping them apart matters. Everything used to return None, so one failed
+        handshake got reported as "did you push the branch?" — a false diagnosis
+        is worse than none.
+        """
         url = path if path.startswith("http") else API + path
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
+        last_error: Exception | None = None
+
+        for attempt in range(1, self.retries + 1):
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "Connection": "close",
+                },
+            )
             try:
-                message = json.loads(body).get("message", body)
-            except json.JSONDecodeError:
-                message = body
-            print(f"  HTTP {exc.code} {path}: {message}", file=sys.stderr)
-            return None
-        except urllib.error.URLError as exc:
-            print(f"  连不上 {path}: {exc.reason}", file=sys.stderr)
-            return None
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", "replace")
+                try:
+                    message = json.loads(body).get("message", body)
+                except json.JSONDecodeError:
+                    message = body
+                # 5xx 值得重试，4xx 不值得。/ 5xx is worth retrying, 4xx is not.
+                if exc.code >= 500 and attempt < self.retries:
+                    last_error = exc
+                    time.sleep(2**attempt)
+                    continue
+                print(f"  HTTP {exc.code} {path}: {message}", file=sys.stderr)
+                return None
+            except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+                # SSL 握手一半断掉、h2 被断、证书主机名不匹配 —— 都在这。
+                # Half-finished TLS handshakes, dropped h2 streams, hostname
+                # mismatches — all land here.
+                last_error = exc
+                if attempt < self.retries:
+                    time.sleep(2**attempt)
+                    continue
+
+        raise NetworkError(f"连不上 {path}：{last_error}")
+
+
+def request_body(url: str, token: str) -> bytes:
+    """给测试用：把一次请求真正发出去。/ For tests: actually fire one request."""
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {token}", "Connection": "close"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
 
 
 # --------------------------------------------------------------------------
@@ -315,6 +373,14 @@ def format_report(report: Report) -> tuple[str, int]:
 
 
 def run(args: argparse.Namespace, gh: GitHub) -> Report:
+    """跑一遍检查。网络挂了会抛 NetworkError，交给 main 报。
+
+    / Run the checks. Raises NetworkError; main reports it.
+
+    不把网络错误塞进「检查不通过」里 —— 那会让人去修一个不存在的问题。
+    / A network failure is not a failed check; folding it in makes people fix
+    something that isn't broken.
+    """
     report = Report()
 
     if args.pr:
@@ -402,7 +468,17 @@ def main(argv: list[str] | None = None) -> int:
 
     gh = GitHub(token)
     print(f"自检（HTTP）：{args.fork}:{args.branch or 'PR #' + str(args.pr)} → {args.upstream}/main\n")
-    report = run(args, gh)
+    try:
+        report = run(args, gh)
+    except NetworkError as exc:
+        # 连不上 ≠ 检查没过。分开说，退出码也分开。
+        # Not the same thing; the exit code says so too.
+        print("连不上 GitHub，这次没做成检查。", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        print(file=sys.stderr)
+        print("这不是你的分支有问题 —— 是网络。过一会儿再跑一次。", file=sys.stderr)
+        print("This is the network, not your branch. Try again later.", file=sys.stderr)
+        return 3
     text, code = format_report(report)
     print(text)
     return code
