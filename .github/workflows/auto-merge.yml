@@ -1,5 +1,6 @@
 name: auto-merge
 
+# guard-test：这一行是一次故意触发的测试。
 # 任何 PR 打开就合并。唯一的例外是改动了 .github/ 的 PR。
 # Merge any PR that opens. The only exception is a PR that touches .github/.
 
